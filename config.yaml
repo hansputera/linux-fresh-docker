@@ -19,6 +19,14 @@ defaults:
     - /var/www
   # Extra docker volume mappings, e.g. ./certs:/etc/nginx/certs
   volumes: []
+  privileged: false
+  cap_add: []
+  resources:
+    cpus: 1.0
+    memory: 2G
+    pids: 256
+    memory_reservation: 256M
+    cpus_reservation: 0.25
 
 services:
   pay-dev:
