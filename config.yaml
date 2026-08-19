@@ -1,0 +1,37 @@
+# Fresh Linux server simulation
+# Edit this file, then run: ./manage.sh up
+
+defaults:
+  image: ubuntu:22.04
+  network: proxy
+  network_external: true
+  cert_resolver: le
+  entrypoint: websecure
+  backend_port: 80
+  ssh_password: changeme
+  persist: true
+  persist_type: volume   # volume = docker named volume, bind = host folder
+  persist_dir: ./data    # only used when persist_type is bind
+  persist_mount: /data
+  persist_paths:
+    - /root
+    - /opt
+    - /var/www
+  # Extra docker volume mappings, e.g. ./certs:/etc/nginx/certs
+  volumes: []
+
+services:
+  pay-dev:
+    hostname: pay-dev
+    ssh_port: 2221
+    domains:
+      - apipay-dev.example.com
+      - pay-dev.example.com
+    # volumes:
+    #   - ./shared/certs:/etc/ssl/custom
+
+  # Add more servers as needed:
+  # api-dev:
+  #   ssh_port: 2222
+  #   domains:
+  #     - apipay-dev.example.com
