@@ -28,6 +28,13 @@ DEFAULTS = {
     "persist_mount": "/data",
     "persist_paths": ["/root", "/opt", "/var/www"],
     "volumes": [],
+    "privileged": False,
+    "cap_add": [],
+    "resources": {
+        "cpus": "1.0",
+        "memory": "1G",
+        "pids": 256,
+    },
 }
 
 
@@ -170,11 +177,92 @@ def parse_volume(spec: str) -> dict:
     if len(parts) == 1:
         return {"type": "anon", "source": None, "dest": parts[0], "raw": raw, "mode": mode}
     source, dest = parts[0], ":".join(parts[1:])
+    if dest in {"", "/"}:
+        raise SystemExit(f"invalid volume destination {raw!r}: cannot mount on '/'")
     if source.startswith(".") or source.startswith("/"):
         kind = "bind"
     else:
         kind = "named"
     return {"type": kind, "source": source, "dest": dest, "raw": raw, "mode": mode}
+
+
+MEMORY_RE = re.compile(r"^\d+(\.\d+)?([kKmMgGtT]i?[bB]?)?$")
+
+
+def validate_resources(svc: dict) -> None:
+    res = svc.get("resources") or {}
+    if not res:
+        return
+    name = svc["name"]
+    if "cpus" in res and res["cpus"] not in (None, ""):
+        try:
+            cpus = float(res["cpus"])
+        except (TypeError, ValueError):
+            raise SystemExit(f"{name}: resources.cpus must be a number")
+        if cpus <= 0:
+            raise SystemExit(f"{name}: resources.cpus must be > 0")
+        res["cpus"] = str(res["cpus"])
+    if "cpus_reservation" in res and res["cpus_reservation"] not in (None, ""):
+        try:
+            if float(res["cpus_reservation"]) <= 0:
+                raise SystemExit(f"{name}: resources.cpus_reservation must be > 0")
+        except (TypeError, ValueError):
+            raise SystemExit(f"{name}: resources.cpus_reservation must be a number")
+    for key in ("memory", "memory_reservation"):
+        value = res.get(key)
+        if value in (None, ""):
+            continue
+        if not MEMORY_RE.fullmatch(str(value)):
+            raise SystemExit(
+                f"{name}: resources.{key} must look like 512m, 1G, 2048M"
+            )
+    if res.get("pids") not in (None, ""):
+        try:
+            pids = int(res["pids"])
+        except (TypeError, ValueError):
+            raise SystemExit(f"{name}: resources.pids must be an integer")
+        if pids <= 0:
+            raise SystemExit(f"{name}: resources.pids must be > 0")
+        res["pids"] = pids
+
+
+def render_resources(svc: dict) -> str:
+    res = svc.get("resources") or {}
+    if not res:
+        return ""
+    lines = []
+    if res.get("cpus") not in (None, ""):
+        lines.append(f'    cpus: "{res["cpus"]}"')
+    if res.get("memory") not in (None, ""):
+        lines.append(f'    mem_limit: {res["memory"]}')
+    if res.get("memory_reservation") not in (None, ""):
+        lines.append(f'    mem_reservation: {res["memory_reservation"]}')
+    if res.get("pids") not in (None, ""):
+        lines.append(f'    pids_limit: {res["pids"]}')
+
+    limit_lines = []
+    reserve_lines = []
+    if res.get("cpus") not in (None, ""):
+        limit_lines.append(f'          cpus: "{res["cpus"]}"')
+    if res.get("memory") not in (None, ""):
+        limit_lines.append(f'          memory: {res["memory"]}')
+    if res.get("pids") not in (None, ""):
+        limit_lines.append(f'          pids: {res["pids"]}')
+    if res.get("cpus_reservation") not in (None, ""):
+        reserve_lines.append(f'          cpus: "{res["cpus_reservation"]}"')
+    if res.get("memory_reservation") not in (None, ""):
+        reserve_lines.append(f'          memory: {res["memory_reservation"]}')
+
+    if limit_lines or reserve_lines:
+        lines.append("    deploy:")
+        lines.append("      resources:")
+        if limit_lines:
+            lines.append("        limits:")
+            lines.extend(limit_lines)
+        if reserve_lines:
+            lines.append("        reservations:")
+            lines.extend(reserve_lines)
+    return ("\n".join(lines) + "\n") if lines else ""
 
 
 def persist_volume_name(service: str, dest: str) -> str:
@@ -197,6 +285,11 @@ def build_volume_mounts(svc: dict) -> list[str]:
         persist_dir = str(svc.get("persist_dir") or "./data").rstrip("/")
         for dest in paths:
             dest = "/" + str(dest).lstrip("/")
+            if dest in {"", "/"}:
+                raise SystemExit(
+                    f"{svc['name']}: cannot mount a volume on '/'. "
+                    "Use specific paths like /root, /opt, /var/www, /data."
+                )
             if persist_type == "bind":
                 rel = dest.lstrip("/")
                 src = f"{persist_dir}/{svc['name']}/{rel}"
@@ -250,12 +343,26 @@ def _merge_service(name: str, raw: dict | None, defaults: dict) -> dict:
     raw = dict(raw)
     extra_volumes = _as_list(raw.pop("volumes", None))
     extra_paths = raw.pop("persist_paths", None)
+    extra_resources = raw.pop("resources", None)
+    extra_caps = raw.pop("cap_add", None)
 
     svc = dict(defaults)
     svc.update({k: v for k, v in raw.items() if v is not None})
     svc["name"] = name
     svc.setdefault("hostname", name)
     svc.setdefault("container_name", name)
+    resources = dict(defaults.get("resources") or {})
+    if extra_resources is None:
+        pass
+    elif not isinstance(extra_resources, dict):
+        raise SystemExit(f"services.{name}: resources must be a mapping")
+    else:
+        resources.update({k: v for k, v in extra_resources.items() if v is not None})
+    svc["resources"] = resources
+    if extra_caps is None:
+        svc["cap_add"] = _as_list(defaults.get("cap_add"))
+    else:
+        svc["cap_add"] = _as_list(extra_caps)
     svc["volumes"] = _as_list(defaults.get("volumes")) + extra_volumes
     if extra_paths is None:
         svc["persist_paths"] = _as_list(defaults.get("persist_paths"))
@@ -273,6 +380,7 @@ def _merge_service(name: str, raw: dict | None, defaults: dict) -> dict:
         raise SystemExit(f"services.{name}: add at least one domain")
     svc["domains"] = [str(d) for d in domains]
     svc["volume_mounts"] = build_volume_mounts(svc)
+    validate_resources(svc)
     return svc
 
 
@@ -431,6 +539,14 @@ def _service_block(svc: dict) -> str:
     labels_block = "\n".join(labels)
     volume_lines = "\n".join(f'      - "{item}"' for item in svc.get("volume_mounts", []))
     volumes_block = f"    volumes:\n{volume_lines}\n" if volume_lines else ""
+    resources_block = render_resources(svc)
+    extra_priv = ""
+    if svc.get("privileged") in (True, "true", "yes"):
+        extra_priv += "    privileged: true\n"
+    caps = [str(c) for c in _as_list(svc.get("cap_add")) if str(c)]
+    if caps:
+        extra_priv += "    cap_add:\n"
+        extra_priv += "".join(f"      - {c}\n" for c in caps)
     return f"""  {svc['name']}:
     build:
       context: .
@@ -441,13 +557,13 @@ def _service_block(svc: dict) -> str:
     container_name: {svc['container_name']}
     hostname: {svc['hostname']}
     restart: unless-stopped
-    stdin_open: true
+{extra_priv}    stdin_open: true
     tty: true
     networks:
       - {svc['network']}
     ports:
       - "{svc['ssh_port']}:22"
-{volumes_block}    labels:
+{resources_block}{volumes_block}    labels:
 {labels_block}
 """
 
@@ -640,6 +756,12 @@ def print_summary(cfg: dict) -> None:
             print("    volumes:")
             for mount in svc["volume_mounts"]:
                 print(f"      - {mount}")
+        res = svc.get("resources") or {}
+        if res:
+            print("    resources:")
+            for key in ("cpus", "memory", "pids", "memory_reservation", "cpus_reservation"):
+                if res.get(key) not in (None, ""):
+                    print(f"      {key}: {res[key]}")
 
 
 def generate_files() -> dict:
