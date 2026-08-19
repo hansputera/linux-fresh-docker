@@ -30,6 +30,7 @@ DEFAULTS = {
     "volumes": [],
     "privileged": False,
     "cap_add": [],
+    "systemd": False,
     "resources": {
         "cpus": "1.0",
         "memory": "1G",
@@ -508,16 +509,32 @@ RUN apt-get update \\
         iproute2 \\
         iputils-ping \\
         procps \\
-    && mkdir -p /var/run/sshd \\
+        systemd \\
+        systemd-sysv \\
+        dbus \\
+    && mkdir -p /var/run/sshd /etc/systemd/system/sshd.service.d \\
     && echo "root:${SSH_PASSWORD}" | chpasswd \\
     && sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config \\
     && sed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config \\
+    && systemctl enable ssh \\
+    && systemctl mask \\
+        dev-hugepages.mount \\
+        sys-fs-fuse-connections.mount \\
+        systemd-udevd.service \\
+        systemd-udev-trigger.service \\
+        getty.target \\
+        console-getty.service \\
+        getty@tty1.service \\
     && apt-get clean \\
     && rm -rf /var/lib/apt/lists/*
 
+ENV container=docker
+
 EXPOSE 22 80 443
 
-# Keep the "server" up like a VM. Install your software later on :80.
+STOPSIGNAL SIGRTMIN+3
+
+# Default: sshd. Overridden to systemd when systemd: true in config.yaml.
 CMD ["/usr/sbin/sshd", "-D"]
 """
 
@@ -541,9 +558,32 @@ def _service_block(svc: dict) -> str:
     volumes_block = f"    volumes:\n{volume_lines}\n" if volume_lines else ""
     resources_block = render_resources(svc)
     extra_priv = ""
-    if svc.get("privileged") in (True, "true", "yes"):
+    systemd = svc.get("systemd") in (True, "true", "yes", "on", 1, "1")
+    if svc.get("privileged") in (True, "true", "yes", "on", 1, "1"):
         extra_priv += "    privileged: true\n"
     caps = [str(c) for c in _as_list(svc.get("cap_add")) if str(c)]
+    if systemd:
+        for cap in ("SYS_ADMIN",):
+            if cap not in caps:
+                caps.append(cap)
+        extra_priv += "    cgroup: host\n"
+        extra_priv += "    stop_signal: SIGRTMIN+3\n"
+        extra_priv += '    command: ["/lib/systemd/systemd"]\n'
+        extra_priv += "    environment:\n"
+        extra_priv += "      container: docker\n"
+        extra_priv += "    tmpfs:\n"
+        extra_priv += "      - /tmp\n"
+        extra_priv += "      - /run\n"
+        extra_priv += "      - /run/lock\n"
+        extra_priv += "    security_opt:\n"
+        extra_priv += "      - seccomp:unconfined\n"
+        extra_priv += "      - apparmor:unconfined\n"
+        volume_lines = volume_lines.splitlines() if volume_lines else []
+        cgroup_line = '      - "/sys/fs/cgroup:/sys/fs/cgroup:rw"'
+        if cgroup_line not in volume_lines:
+            volume_lines.append(cgroup_line)
+        volume_lines = "\n".join(volume_lines)
+        volumes_block = f"    volumes:\n{volume_lines}\n" if volume_lines else ""
     if caps:
         extra_priv += "    cap_add:\n"
         extra_priv += "".join(f"      - {c}\n" for c in caps)
