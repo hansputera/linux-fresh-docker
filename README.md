@@ -104,8 +104,8 @@ services:
     hostname: pay-dev
     ssh_port: 2221
     domains:
-      - apipay-dev.example.com
-      - pay-dev.example.com
+      - apipay-dev.mitracerdas.com
+      - pay-dev.mitracerdas.com
 
   api-dev:
     ssh_port: 2222
@@ -113,7 +113,7 @@ services:
       cpus: 2.0
       memory: 2G
     domains:
-      - api-dev.example.com
+      - api-dev.mitracerdas.com
 ```
 
 A service can override any default (`image`, `network`, `ssh_password`, volumes, resources, …).
@@ -191,6 +191,38 @@ docker volume ls
 docker volume inspect pay-dev-data
 ```
 
+## systemd
+
+Set this to use `systemctl` inside the container:
+
+```yaml
+defaults:
+  systemd: true
+  privileged: false
+```
+
+That makes systemd PID 1 and adds:
+
+- `cgroup: host`
+- tmpfs for `/run`, `/run/lock`, `/tmp`
+- bind `/sys/fs/cgroup`
+- `SYS_ADMIN` plus unconfined seccomp/apparmor
+- `command: ["/lib/systemd/systemd"]`
+
+SSH is started as `ssh.service`, not as PID 1.
+
+This does **not** use `privileged: true` and does **not** share the host network, so host iptables stays separate.
+
+Rebuild after changing it:
+
+```bash
+./manage.sh rebuild
+./manage.sh shell pay-dev
+systemctl status ssh
+```
+
+`systemctl enable` writes to `/etc/systemd`. Add `/etc/systemd` to `persist_paths` if you want enabled units to survive `down`.
+
 ## Resource limits
 
 ```yaml
@@ -241,8 +273,8 @@ apt-get update
 
 Then open:
 
-- `https://apipay-dev.example.com.com`
-- `https://pay-dev.example.com`
+- `https://apipay-dev.mitracerdas.com`
+- `https://pay-dev.mitracerdas.com`
 
 ## Notes and limits
 
